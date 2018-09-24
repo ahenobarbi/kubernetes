@@ -49,6 +49,7 @@ import (
 	"k8s.io/kubernetes/pkg/api/legacyscheme"
 	"k8s.io/kubernetes/pkg/controller"
 	metricsclient "k8s.io/kubernetes/pkg/controller/podautoscaler/metrics"
+	"sync"
 )
 
 var (
@@ -89,6 +90,44 @@ type HorizontalController struct {
 
 	// Latest unstabilized recommendations for each autoscaler.
 	recommendations map[string][]timestampedRecommendation
+
+	// Guards remaining fields
+	mu *sync.Mutex
+
+	// Number of HPAs processed
+	hpasProcessed int
+
+	// Last time we logged info about HPA processing speed
+	lastHpasProcessedLog time.Time
+
+	// Last # of hpas processed we logged
+	lastLoggedHpasProcessed int
+}
+
+func (h *HorizontalController) increaseHpasProcessed() {
+	h.mu.Lock()
+	h.hpasProcessed += 1
+	h.mu.Unlock()
+}
+
+func (h *HorizontalController) logHpasProcessed() {
+	h.mu.Lock()
+	sinceLast := h.hpasProcessed - h.lastLoggedHpasProcessed
+	now := time.Now()
+	elapsed := now.Sub(h.lastHpasProcessedLog).Seconds()
+	avg := float64(sinceLast) / elapsed
+	glog.Infof("logHpasProcessed; since start: %d; since last log: %d; average since last log/s: %v", h.hpasProcessed, sinceLast, avg)
+
+	h.lastHpasProcessedLog = now
+	h.lastLoggedHpasProcessed = h.hpasProcessed
+	h.mu.Unlock()
+}
+
+func (h *HorizontalController) KeepLogging() {
+	for {
+		time.Sleep(15 * time.Second)
+		h.logHpasProcessed()
+	}
 }
 
 // NewHorizontalController creates a new HorizontalController.
@@ -144,6 +183,7 @@ func NewHorizontalController(
 		delayOfInitialReadinessStatus,
 	)
 	hpaController.replicaCalc = replicaCalc
+	hpaController.lastHpasProcessedLog = time.Now()
 
 	return hpaController
 }
@@ -160,6 +200,7 @@ func (a *HorizontalController) Run(stopCh <-chan struct{}) {
 		return
 	}
 
+	go a.KeepLogging()
 	// start a single worker (we may wish to start more in the future)
 	go wait.Until(a.worker, time.Second, stopCh)
 
@@ -197,6 +238,7 @@ func (a *HorizontalController) deleteHPA(obj interface{}) {
 func (a *HorizontalController) worker() {
 	for a.processNextWorkItem() {
 	}
+	a.increaseHpasProcessed()
 	glog.Infof("horizontal pod autoscaler controller worker shutting down")
 }
 

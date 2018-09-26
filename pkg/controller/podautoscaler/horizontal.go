@@ -17,6 +17,7 @@ limitations under the License.
 package podautoscaler
 
 import (
+	"context"
 	"fmt"
 	"math"
 	"time"
@@ -62,6 +63,98 @@ type timestampedRecommendation struct {
 	timestamp      time.Time
 }
 
+type recommendationLog struct {
+	recommendations map[string][]timestampedRecommendation
+	mu              *sync.Mutex
+}
+
+func (rl *recommendationLog) insertNow(key string, size int32, expireAfter time.Duration) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-expireAfter)
+	for i, rec := range rl.recommendations[key] {
+		if rec.timestamp.Before(cutoff) {
+			rl.recommendations[key][i] = timestampedRecommendation{size, time.Now()}
+			return
+		}
+	}
+	rl.recommendations[key] = append(rl.recommendations[key], timestampedRecommendation{size, time.Now()})
+}
+
+func (rl *recommendationLog) maxWithFresh(key string, current int32, expireAfter time.Duration) (result int32) {
+	result = current
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	cutoff := time.Now().Add(-expireAfter)
+	for _, rec := range rl.recommendations[key] {
+		if rec.timestamp.After(cutoff) && rec.recommendation > result {
+			result = rec.recommendation
+		}
+	}
+	return result
+}
+
+func (rl *recommendationLog) erase(key string) {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	delete(rl.recommendations, key)
+}
+
+func (rl *recommendationLog) hasKey(key string) bool {
+	rl.mu.Lock()
+	defer rl.mu.Unlock()
+	return rl.recommendations[key] != nil
+}
+
+func NewRecommendationLog() *recommendationLog {
+	return &recommendationLog{
+		recommendations: map[string][]timestampedRecommendation{},
+		mu:              &sync.Mutex{},
+	}
+}
+
+type sizeLogger struct {
+	mu                      *sync.Mutex
+	hpasProcessed           int
+	lastHpasProcessedLog    time.Time
+	firstHpaProcessed       time.Time
+	lastLoggedHpasProcessed int
+}
+
+func (sl *sizeLogger) recordProcessed() {
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	if sl.hpasProcessed == 0 {
+		sl.firstHpaProcessed = time.Now()
+	}
+	sl.hpasProcessed += 1
+}
+
+func (sl *sizeLogger) log() {
+	if sl.hpasProcessed == 0 {
+		return
+	}
+	sl.mu.Lock()
+	defer sl.mu.Unlock()
+	sinceLast := sl.hpasProcessed - sl.lastLoggedHpasProcessed
+	now := time.Now()
+	elapsed := now.Sub(sl.lastHpasProcessedLog).Seconds()
+	avg := float64(sinceLast) / elapsed
+	avgAll := float64(sl.hpasProcessed) / now.Sub(sl.firstHpaProcessed).Seconds()
+	glog.Infof("logHpasProcessed; since start: %d (avg/s: %v); since last log: %d; average since last log/s: %v", sl.hpasProcessed, avgAll, sinceLast, avg)
+	sl.lastHpasProcessedLog = now
+	sl.lastLoggedHpasProcessed = sl.hpasProcessed
+}
+
+func NewSizeLoggger() *sizeLogger {
+	return &sizeLogger{
+		mu:                      &sync.Mutex{},
+		hpasProcessed:           0,
+		lastHpasProcessedLog:    time.Now(),
+		lastLoggedHpasProcessed: 0,
+	}
+}
+
 // HorizontalController is responsible for the synchronizing HPA objects stored
 // in the system with the actual deployments/replication controllers they
 // control.
@@ -89,44 +182,19 @@ type HorizontalController struct {
 	queue workqueue.RateLimitingInterface
 
 	// Latest unstabilized recommendations for each autoscaler.
-	recommendations map[string][]timestampedRecommendation
+	recommendations *recommendationLog
 
-	// Guards remaining fields
-	mu *sync.Mutex
-
-	// Number of HPAs processed
-	hpasProcessed int
-
-	// Last time we logged info about HPA processing speed
-	lastHpasProcessedLog time.Time
-
-	// Last # of hpas processed we logged
-	lastLoggedHpasProcessed int
+	logger *sizeLogger
 }
 
-func (h *HorizontalController) increaseHpasProcessed() {
-	h.mu.Lock()
-	h.hpasProcessed += 1
-	h.mu.Unlock()
-}
-
-func (h *HorizontalController) logHpasProcessed() {
-	h.mu.Lock()
-	sinceLast := h.hpasProcessed - h.lastLoggedHpasProcessed
-	now := time.Now()
-	elapsed := now.Sub(h.lastHpasProcessedLog).Seconds()
-	avg := float64(sinceLast) / elapsed
-	glog.Infof("logHpasProcessed; since start: %d; since last log: %d; average since last log/s: %v", h.hpasProcessed, sinceLast, avg)
-
-	h.lastHpasProcessedLog = now
-	h.lastLoggedHpasProcessed = h.hpasProcessed
-	h.mu.Unlock()
-}
-
-func (h *HorizontalController) KeepLogging() {
+func (h *HorizontalController) KeepLogging(ctx context.Context) {
 	for {
-		time.Sleep(15 * time.Second)
-		h.logHpasProcessed()
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(15 * time.Second):
+			h.logger.log()
+		}
 	}
 }
 
@@ -158,7 +226,8 @@ func NewHorizontalController(
 		downscaleStabilisationWindow: downscaleStabilisationWindow,
 		queue:           workqueue.NewNamedRateLimitingQueue(NewDefaultHPARateLimiter(resyncPeriod), "horizontalpodautoscaler"),
 		mapper:          mapper,
-		recommendations: map[string][]timestampedRecommendation{},
+		recommendations: NewRecommendationLog(),
+		logger:          NewSizeLoggger(),
 	}
 
 	hpaInformer.Informer().AddEventHandlerWithResyncPeriod(
@@ -183,7 +252,6 @@ func NewHorizontalController(
 		delayOfInitialReadinessStatus,
 	)
 	hpaController.replicaCalc = replicaCalc
-	hpaController.lastHpasProcessedLog = time.Now()
 
 	return hpaController
 }
@@ -200,9 +268,15 @@ func (a *HorizontalController) Run(stopCh <-chan struct{}) {
 		return
 	}
 
-	go a.KeepLogging()
-	// start a single worker (we may wish to start more in the future)
-	go wait.Until(a.worker, time.Second, stopCh)
+	ctx := context.Background()
+	ctx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go a.KeepLogging(ctx)
+
+	// Start workers.
+	for i := 0; i < 5; i++ {
+		go wait.Until(a.worker, time.Second, stopCh)
+	}
 
 	<-stopCh
 }
@@ -237,8 +311,8 @@ func (a *HorizontalController) deleteHPA(obj interface{}) {
 
 func (a *HorizontalController) worker() {
 	for a.processNextWorkItem() {
+		a.logger.recordProcessed()
 	}
-	a.increaseHpasProcessed()
 	glog.Infof("horizontal pod autoscaler controller worker shutting down")
 }
 
@@ -349,7 +423,7 @@ func (a *HorizontalController) reconcileKey(key string) error {
 	hpa, err := a.hpaLister.HorizontalPodAutoscalers(namespace).Get(name)
 	if errors.IsNotFound(err) {
 		glog.Infof("Horizontal Pod Autoscaler %s has been deleted in %s", name, namespace)
-		delete(a.recommendations, key)
+		a.recommendations.erase(key)
 		return nil
 	}
 
@@ -507,8 +581,8 @@ func (a *HorizontalController) computeStatusForExternalMetric(currentReplicas in
 }
 
 func (a *HorizontalController) recordInitialRecommendation(currentReplicas int32, key string) {
-	if a.recommendations[key] == nil {
-		a.recommendations[key] = []timestampedRecommendation{{currentReplicas, time.Now()}}
+	if !a.recommendations.hasKey(key) {
+		a.recommendations.insertNow(key, currentReplicas, a.downscaleStabilisationWindow)
 	}
 }
 
@@ -642,24 +716,8 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 // - replaces old recommendation with the newest recommendation,
 // - returns max of recommendations that are not older than downscaleStabilisationWindow.
 func (a *HorizontalController) stabilizeRecommendation(key string, prenormalizedDesiredReplicas int32) int32 {
-	maxRecommendation := prenormalizedDesiredReplicas
-	foundOldSample := false
-	oldSampleIndex := 0
-	cutoff := time.Now().Add(-a.downscaleStabilisationWindow)
-	for i, rec := range a.recommendations[key] {
-		if rec.timestamp.Before(cutoff) {
-			foundOldSample = true
-			oldSampleIndex = i
-		} else if rec.recommendation > maxRecommendation {
-			maxRecommendation = rec.recommendation
-		}
-	}
-	if foundOldSample {
-		a.recommendations[key][oldSampleIndex] = timestampedRecommendation{prenormalizedDesiredReplicas, time.Now()}
-	} else {
-		a.recommendations[key] = append(a.recommendations[key], timestampedRecommendation{prenormalizedDesiredReplicas, time.Now()})
-	}
-	return maxRecommendation
+	a.recommendations.insertNow(key, prenormalizedDesiredReplicas, a.downscaleStabilisationWindow)
+	return a.recommendations.maxWithFresh(key, prenormalizedDesiredReplicas, a.downscaleStabilisationWindow)
 }
 
 // normalizeDesiredReplicas takes the metrics desired replicas value and normalizes it based on the appropriate conditions (i.e. < maxReplicas, >

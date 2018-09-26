@@ -506,7 +506,7 @@ func (tc *legacyTestCase) runTest(t *testing.T) {
 	hpaController.hpaListerSynced = alwaysReady
 
 	if tc.recommendations != nil {
-		hpaController.recommendations["test-namespace/test-hpa"] = tc.recommendations
+		hpaController.recommendations.recommendations["test-namespace/test-hpa"] = tc.recommendations
 	}
 
 	stop := make(chan struct{})

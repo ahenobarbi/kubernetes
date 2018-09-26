@@ -680,7 +680,7 @@ func (tc *testCase) setupController(t *testing.T) (*HorizontalController, inform
 	)
 	hpaController.hpaListerSynced = alwaysReady
 	if tc.recommendations != nil {
-		hpaController.recommendations["test-namespace/test-hpa"] = tc.recommendations
+		hpaController.recommendations.recommendations["test-namespace/test-hpa"] = tc.recommendations
 	}
 
 	return hpaController, informerFactory
@@ -2513,16 +2513,17 @@ func TestNormalizeDesiredReplicas(t *testing.T) {
 	for _, tc := range tests {
 		hc := HorizontalController{
 			downscaleStabilisationWindow: 5 * time.Minute,
-			recommendations: map[string][]timestampedRecommendation{
-				tc.key: tc.recommendations,
-			},
+			recommendations:              NewRecommendationLog(),
+		}
+		hc.recommendations.recommendations = map[string][]timestampedRecommendation{
+			tc.key: tc.recommendations,
 		}
 		r := hc.stabilizeRecommendation(tc.key, tc.prenormalizedDesiredReplicas)
 		if r != tc.expectedStabilizedReplicas {
 			t.Errorf("[%s] got %d stabilized replicas, expected %d", tc.name, r, tc.expectedStabilizedReplicas)
 		}
-		if len(hc.recommendations[tc.key]) != tc.expectedLogLength {
-			t.Errorf("[%s] after  stabilization recommendations log has %d entries, expected %d", tc.name, len(hc.recommendations[tc.key]), tc.expectedLogLength)
+		if len(hc.recommendations.recommendations[tc.key]) != tc.expectedLogLength {
+			t.Errorf("[%s] after  stabilization recommendations log has %d entries, expected %d", tc.name, len(hc.recommendations.recommendations[tc.key]), tc.expectedLogLength)
 		}
 	}
 }

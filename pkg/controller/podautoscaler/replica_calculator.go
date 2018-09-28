@@ -29,6 +29,7 @@ import (
 	corelisters "k8s.io/client-go/listers/core/v1"
 	podutil "k8s.io/kubernetes/pkg/api/v1/pod"
 	metricsclient "k8s.io/kubernetes/pkg/controller/podautoscaler/metrics"
+	"github.com/golang/glog"
 )
 
 const (
@@ -59,12 +60,15 @@ func NewReplicaCalculator(metricsClient metricsclient.MetricsClient, podLister c
 
 // GetResourceReplicas calculates the desired replica count based on a target resource utilization percentage
 // of the given resource for pods matching the given selector in the given namespace, and the current replica count
-func (c *ReplicaCalculator) GetResourceReplicas(currentReplicas int32, targetUtilization int32, resource v1.ResourceName, namespace string, selector labels.Selector) (replicaCount int32, utilization int32, rawUtilization int64, timestamp time.Time, err error) {
+func (c *ReplicaCalculator) GetResourceReplicas(currentReplicas int32, targetUtilization int32, resource v1.ResourceName, namespace string, selector labels.Selector, worker int, runId int64) (replicaCount int32, utilization int32, rawUtilization int64, timestamp time.Time, err error) {
+	glog.Infof("[worker %d, run %d] GetResourceReplicas", worker, runId)
 	metrics, timestamp, err := c.metricsClient.GetResourceMetric(resource, namespace, selector)
+	glog.Infof("[worker %d, run %d] GetResourceReplicas GetResourceMetric done", worker, runId)
 	if err != nil {
 		return 0, 0, 0, time.Time{}, fmt.Errorf("unable to get metrics for resource %s: %v", resource, err)
 	}
 	podList, err := c.podLister.Pods(namespace).List(selector)
+	glog.Infof("[worker %d, run %d] GetResourceReplicas ListingPods done", worker, runId)
 	if err != nil {
 		return 0, 0, 0, time.Time{}, fmt.Errorf("unable to get pods while calculating replica count: %v", err)
 	}
@@ -75,6 +79,7 @@ func (c *ReplicaCalculator) GetResourceReplicas(currentReplicas int32, targetUti
 	}
 
 	readyPodCount, ignoredPods, missingPods := groupPods(podList, metrics, resource, c.cpuInitializationPeriod, c.delayOfInitialReadinessStatus)
+	glog.Infof("[worker %d, run %d] GetResourceReplicas grouping pods done", worker, runId)
 	removeMetricsForPods(metrics, ignoredPods)
 	requests, err := calculatePodRequests(podList, resource)
 	if err != nil {
@@ -86,6 +91,7 @@ func (c *ReplicaCalculator) GetResourceReplicas(currentReplicas int32, targetUti
 	}
 
 	usageRatio, utilization, rawUtilization, err := metricsclient.GetResourceUtilizationRatio(metrics, requests, targetUtilization)
+	glog.Infof("[worker %d, run %d] GetResourceReplicas GetResourceUtilizationRatio done", worker, runId)
 	if err != nil {
 		return 0, 0, 0, time.Time{}, err
 	}

@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	mrand "math/rand"
 	"time"
 
 	"github.com/golang/glog"
@@ -275,7 +276,7 @@ func (a *HorizontalController) Run(stopCh <-chan struct{}) {
 
 	// Start workers.
 	for i := 0; i < 5; i++ {
-		go wait.Until(a.worker, time.Second, stopCh)
+		go wait.Until(func() {a.worker(i)}, time.Second, stopCh)
 	}
 
 	<-stopCh
@@ -309,28 +310,48 @@ func (a *HorizontalController) deleteHPA(obj interface{}) {
 	a.queue.Forget(key)
 }
 
-func (a *HorizontalController) worker() {
-	for a.processNextWorkItem() {
+func (a *HorizontalController) worker(i int) {
+	glog.Infof("Starting worker %d", i)
+	defer glog.Infof("Ending run %d", i)
+	for {
+		runId := mrand.Int63()
+		glog.Infof("[worker %d, run %d] starts", i, runId)
+		defer glog.Infof("[worker %d, run %d] ends", i, runId)
+		if a.processNextWorkItem(i, runId) {
+			glog.Infof("[worker %d, run %d] finished processNextWorkItem")
+		} else {
+			glog.Infof("[worker %d, run %d] finished processNextWorkItem")
+			return
+		}
 		a.logger.recordProcessed()
 	}
 	glog.Infof("horizontal pod autoscaler controller worker shutting down")
 }
 
-func (a *HorizontalController) processNextWorkItem() bool {
+func (a *HorizontalController) processNextWorkItem(worker int, runId int64) bool {
+	glog.Infof("[worker %d, run %d] processNextWorkItem starts", worker, runId)
+	defer glog.Infof("[worker %d, run %d] processNextWorkItem ends", worker, runId)
 	key, quit := a.queue.Get()
+	glog.Infof("[worker %d, run %d] processNextWorkItem finished Get() call", worker, runId)
 	if quit {
+		glog.Infof("[worker %d, run %d] processNextWorkItem Get() sad quit", worker, runId)
 		return false
 	}
+	glog.Infof("[worker %d, run %d] processNextWorkItem Get() sad continue", worker, runId)
 	defer a.queue.Done(key)
-
-	err := a.reconcileKey(key.(string))
+	glog.Infof("[worker %d, run %d] processNextWorkItem deferred making key as done", worker, runId)
+	err := a.reconcileKey(key.(string), worker, runId)
+	glog.Infof("[worker %d, run %d] processNextWorkItem reconcileKey done", worker, runId)
 	if err == nil {
 		// don't "forget" here because we want to only process a given HPA once per resync interval
+		glog.Infof("[worker %d, run %d] processNextWorkItem no error from reconcileKey, returning true", worker, runId)
 		return true
 	}
 
 	a.queue.AddRateLimited(key)
+	glog.Infof("[worker %d, run %d] processNextWorkItem AddRateLimited() finished", worker, runId)
 	utilruntime.HandleError(err)
+	glog.Infof("[worker %d, run %d] processNextWorkItem HandleError finished", worker, runId)
 	return true
 }
 
@@ -338,7 +359,7 @@ func (a *HorizontalController) processNextWorkItem() bool {
 // returning the maximum  of the computed replica counts, a description of the associated metric, and the statuses of
 // all metrics computed.
 func (a *HorizontalController) computeReplicasForMetrics(hpa *autoscalingv2.HorizontalPodAutoscaler, scale *autoscalingv1.Scale,
-	metricSpecs []autoscalingv2.MetricSpec) (replicas int32, metric string, statuses []autoscalingv2.MetricStatus, timestamp time.Time, err error) {
+	metricSpecs []autoscalingv2.MetricSpec, worker int, runId int64) (replicas int32, metric string, statuses []autoscalingv2.MetricStatus, timestamp time.Time, err error) {
 
 	currentReplicas := scale.Status.Replicas
 
@@ -388,7 +409,9 @@ func (a *HorizontalController) computeReplicasForMetrics(hpa *autoscalingv2.Hori
 				return 0, "", nil, time.Time{}, fmt.Errorf("failed to get object metric value: %v", err)
 			}
 		case autoscalingv2.ResourceMetricSourceType:
-			replicaCountProposal, timestampProposal, metricNameProposal, err = a.computeStatusForResourceMetric(currentReplicas, metricSpec, hpa, selector, &statuses[i])
+			glog.Infof("[worker %d, run %d] computeReplicasForMetrics invoke computeStatusForResourceMetric", worker, runId)
+			replicaCountProposal, timestampProposal, metricNameProposal, err = a.computeStatusForResourceMetric(currentReplicas, metricSpec, hpa, selector, &statuses[i], worker, runId)
+			glog.Infof("[worker %d, run %d] computeReplicasForMetrics computeStatusForResourceMetric done", worker, runId)
 			if err != nil {
 				return 0, "", nil, time.Time{}, err
 			}
@@ -414,20 +437,28 @@ func (a *HorizontalController) computeReplicasForMetrics(hpa *autoscalingv2.Hori
 	return replicas, metric, statuses, timestamp, nil
 }
 
-func (a *HorizontalController) reconcileKey(key string) error {
+func (a *HorizontalController) reconcileKey(key string, worker int, runId int64) error {
+	glog.Infof("[worker %d, run %d] reconcileKey starts", worker, runId)
+	glog.Infof("[worker %d, run %d] reconcileKey ends", worker, runId)
 	namespace, name, err := cache.SplitMetaNamespaceKey(key)
+	glog.Infof("[worker %d, run %d] reconcileKey SplitMetaNamespaceKey done", worker, runId)
 	if err != nil {
+		glog.Infof("[worker %d, run %d] reconcileKey SplitMetaNamespaceKey returned error", worker, runId)
 		return err
 	}
 
 	hpa, err := a.hpaLister.HorizontalPodAutoscalers(namespace).Get(name)
+	glog.Infof("[worker %d, run %d] reconcileKey HorizontalPodAutoscalers().Get() done", worker, runId)
 	if errors.IsNotFound(err) {
+		glog.Infof("[worker %d, run %d] reconcileKey HorizontalPodAutoscalers().Get() returned an error", worker, runId)
 		glog.Infof("Horizontal Pod Autoscaler %s has been deleted in %s", name, namespace)
 		a.recommendations.erase(key)
+		glog.Infof("[worker %d, run %d] reconcileKey key erased", worker, runId)
 		return nil
 	}
 
-	return a.reconcileAutoscaler(hpa, key)
+	glog.Infof("[worker %d, run %d] reconcileKey starting  reconcileAutoscaler()", worker, runId)
+	return a.reconcileAutoscaler(hpa, key, worker, runId)
 }
 
 // computeStatusForObjectMetric computes the desired number of replicas for the specified metric of type ObjectMetricSourceType.
@@ -479,8 +510,10 @@ func (a *HorizontalController) computeStatusForPodsMetric(currentReplicas int32,
 }
 
 // computeStatusForResourceMetric computes the desired number of replicas for the specified metric of type ResourceMetricSourceType.
-func (a *HorizontalController) computeStatusForResourceMetric(currentReplicas int32, metricSpec autoscalingv2.MetricSpec, hpa *autoscalingv2.HorizontalPodAutoscaler, selector labels.Selector, status *autoscalingv2.MetricStatus) (int32, time.Time, string, error) {
+func (a *HorizontalController) computeStatusForResourceMetric(currentReplicas int32, metricSpec autoscalingv2.MetricSpec, hpa *autoscalingv2.HorizontalPodAutoscaler, selector labels.Selector, status *autoscalingv2.MetricStatus, worker int, runId int64) (int32, time.Time, string, error) {
+	glog.Infof("[worker %d, run %d] computeReplicasForMetrics", worker, runId)
 	if metricSpec.Resource.Target.AverageValue != nil {
+		glog.Infof("[worker %d, run %d] computeReplicasForMetrics for average value", worker, runId)
 		var rawProposal int64
 		replicaCountProposal, rawProposal, timestampProposal, err := a.replicaCalc.GetRawResourceReplicas(currentReplicas, metricSpec.Resource.Target.AverageValue.MilliValue(), metricSpec.Resource.Name, hpa.Namespace, selector)
 		if err != nil {
@@ -500,6 +533,7 @@ func (a *HorizontalController) computeStatusForResourceMetric(currentReplicas in
 		}
 		return replicaCountProposal, timestampProposal, metricNameProposal, nil
 	} else {
+		glog.Infof("[worker %d, run %d] computeReplicasForMetrics for average utilization", worker, runId)
 		if metricSpec.Resource.Target.AverageUtilization == nil {
 			errMsg := "invalid resource metric source: neither a utilization target nor a value target was set"
 			a.eventRecorder.Event(hpa, v1.EventTypeWarning, "FailedGetResourceMetric", errMsg)
@@ -509,7 +543,9 @@ func (a *HorizontalController) computeStatusForResourceMetric(currentReplicas in
 		targetUtilization := *metricSpec.Resource.Target.AverageUtilization
 		var percentageProposal int32
 		var rawProposal int64
-		replicaCountProposal, percentageProposal, rawProposal, timestampProposal, err := a.replicaCalc.GetResourceReplicas(currentReplicas, targetUtilization, metricSpec.Resource.Name, hpa.Namespace, selector)
+		glog.Infof("[worker %d, run %d] computeReplicasForMetrics will invoke GetResourceReplicas", worker, runId)
+		replicaCountProposal, percentageProposal, rawProposal, timestampProposal, err := a.replicaCalc.GetResourceReplicas(currentReplicas, targetUtilization, metricSpec.Resource.Name, hpa.Namespace, selector, worker, runId)
+		glog.Infof("[worker %d, run %d] computeReplicasForMetrics done GetResourceReplicas", worker, runId)
 		if err != nil {
 			a.eventRecorder.Event(hpa, v1.EventTypeWarning, "FailedGetResourceMetric", err.Error())
 			setCondition(hpa, autoscalingv2.ScalingActive, v1.ConditionFalse, "FailedGetResourceMetric", "the HPA was unable to compute the replica count: %v", err)
@@ -586,17 +622,23 @@ func (a *HorizontalController) recordInitialRecommendation(currentReplicas int32
 	}
 }
 
-func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.HorizontalPodAutoscaler, key string) error {
+func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.HorizontalPodAutoscaler, key string, worker int, runId int64) error {
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler starts", worker, runId)
+	defer glog.Infof("[worker %d, run %d] reconcileAutoscaler ends", worker, runId)
 	// make a copy so that we never mutate the shared informer cache (conversion can mutate the object)
 	hpav1 := hpav1Shared.DeepCopy()
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler made a copy of the hpa", worker, runId)
 	// then, convert to autoscaling/v2, which makes our lives easier when calculating metrics
 	hpaRaw, err := unsafeConvertToVersionVia(hpav1, autoscalingv2.SchemeGroupVersion)
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler converted the copy", worker, runId)
 	if err != nil {
+		glog.Infof("[worker %d, run %d] reconcileAutoscaler converting copy returned an error", worker, runId)
 		a.eventRecorder.Event(hpav1, v1.EventTypeWarning, "FailedConvertHPA", err.Error())
 		return fmt.Errorf("failed to convert the given HPA to %s: %v", autoscalingv2.SchemeGroupVersion.String(), err)
 	}
 	hpa := hpaRaw.(*autoscalingv2.HorizontalPodAutoscaler)
 	hpaStatusOriginal := hpa.Status.DeepCopy()
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler made a copy of the status", worker, runId)
 
 	reference := fmt.Sprintf("%s/%s/%s", hpa.Spec.ScaleTargetRef.Kind, hpa.Namespace, hpa.Spec.ScaleTargetRef.Name)
 
@@ -613,6 +655,7 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 		Kind:  hpa.Spec.ScaleTargetRef.Kind,
 	}
 
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler done some string manipulation", worker, runId)
 	mappings, err := a.mapper.RESTMappings(targetGK)
 	if err != nil {
 		a.eventRecorder.Event(hpa, v1.EventTypeWarning, "FailedGetScale", err.Error())
@@ -620,6 +663,7 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 		a.updateStatusIfNeeded(hpaStatusOriginal, hpa)
 		return fmt.Errorf("unable to determine resource for scale target reference: %v", err)
 	}
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler mapper.RESTMappings() err handling done", worker, runId)
 
 	scale, targetGR, err := a.scaleForResourceMappings(hpa.Namespace, hpa.Spec.ScaleTargetRef.Name, mappings)
 	if err != nil {
@@ -628,9 +672,12 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 		a.updateStatusIfNeeded(hpaStatusOriginal, hpa)
 		return fmt.Errorf("failed to query scale subresource for %s: %v", reference, err)
 	}
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler scaleForResourceMappings() err handling done", worker, runId)
 	setCondition(hpa, autoscalingv2.AbleToScale, v1.ConditionTrue, "SucceededGetScale", "the HPA controller was able to get the target's current scale")
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler setCondition() done", worker, runId)
 	currentReplicas := scale.Status.Replicas
 	a.recordInitialRecommendation(currentReplicas, key)
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler recordInitialRecommendation() done", worker, runId)
 
 	var metricStatuses []autoscalingv2.MetricStatus
 	metricDesiredReplicas := int32(0)
@@ -642,11 +689,11 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 	timestamp := time.Now()
 
 	rescale := true
-
 	if scale.Spec.Replicas == 0 {
 		// Autoscaling is disabled for this resource
 		desiredReplicas = 0
 		rescale = false
+		glog.Infof("[worker %d, run %d] reconcileAutoscaler replicas 0, setting condition", worker, runId)
 		setCondition(hpa, autoscalingv2.ScalingActive, v1.ConditionFalse, "ScalingDisabled", "scaling is disabled since the replica count of the target is zero")
 	} else if currentReplicas > hpa.Spec.MaxReplicas {
 		rescaleReason = "Current number of replicas above Spec.MaxReplicas"
@@ -658,8 +705,9 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 		rescaleReason = "Current number of replicas must be greater than 0"
 		desiredReplicas = 1
 	} else {
-
-		metricDesiredReplicas, metricName, metricStatuses, metricTimestamp, err = a.computeReplicasForMetrics(hpa, scale, hpa.Spec.Metrics)
+		glog.Infof("[worker %d, run %d] reconcileAutoscaler computing replicas for metrics", worker, runId)
+		metricDesiredReplicas, metricName, metricStatuses, metricTimestamp, err = a.computeReplicasForMetrics(hpa, scale, hpa.Spec.Metrics, worker, runId)
+		glog.Infof("[worker %d, run %d] reconcileAutoscaler done computing replicas for metrics", worker, runId)
 		if err != nil {
 			a.setCurrentReplicasInStatus(hpa, currentReplicas)
 			if err := a.updateStatusIfNeeded(hpaStatusOriginal, hpa); err != nil {
@@ -686,8 +734,10 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 		desiredReplicas = a.normalizeDesiredReplicas(hpa, key, currentReplicas, desiredReplicas)
 		rescale = desiredReplicas != currentReplicas
 	}
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler deciding rescale done", worker, runId)
 
 	if rescale {
+		glog.Infof("[worker %d, run %d] reconcileAutoscaler starting applying rescale", worker, runId)
 		scale.Spec.Replicas = desiredReplicas
 		_, err = a.scaleNamespacer.Scales(hpa.Namespace).Update(targetGR, scale)
 		if err != nil {
@@ -703,12 +753,14 @@ func (a *HorizontalController) reconcileAutoscaler(hpav1Shared *autoscalingv1.Ho
 		a.eventRecorder.Eventf(hpa, v1.EventTypeNormal, "SuccessfulRescale", "New size: %d; reason: %s", desiredReplicas, rescaleReason)
 		glog.Infof("Successful rescale of %s, old size: %d, new size: %d, reason: %s",
 			hpa.Name, currentReplicas, desiredReplicas, rescaleReason)
+		glog.Infof("[worker %d, run %d] reconcileAutoscaler done applying rescale", worker, runId)
 	} else {
 		glog.V(4).Infof("decided not to scale %s to %v (last scale time was %s)", reference, desiredReplicas, hpa.Status.LastScaleTime)
 		desiredReplicas = currentReplicas
 	}
 
 	a.setStatus(hpa, currentReplicas, desiredReplicas, metricStatuses, rescale)
+	glog.Infof("[worker %d, run %d] reconcileAutoscaler setting status done", worker, runId)
 	return a.updateStatusIfNeeded(hpaStatusOriginal, hpa)
 }
 

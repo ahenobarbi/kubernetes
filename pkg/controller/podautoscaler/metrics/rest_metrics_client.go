@@ -66,7 +66,11 @@ type resourceMetricsClient struct {
 func (c *resourceMetricsClient) GetResourceMetric(resource v1.ResourceName, namespace string, selector labels.Selector) (PodMetricsInfo, time.Time, error) {
 	id := rand.Int63()
 	glog.Infof("GetResourceMetric %d", id)
-	metrics, err := c.client.PodMetricses(namespace).List(metav1.ListOptions{LabelSelector: selector.String()})
+	podMetricses := c.client.PodMetricses(namespace)
+	glog.Infof("GetResourceMetric %d made podMetricses", id)
+	op := metav1.ListOptions{LabelSelector: selector.String()}
+	glog.Infof("GetResourceMetric %d made op", id)
+	metrics, err := podMetricses.List(op)
 	glog.Infof("GetResourceMetric PodMetricses.List done %d", id)
 	if err != nil {
 		return nil, time.Time{}, fmt.Errorf("unable to fetch metrics from resource metrics API: %v", err)

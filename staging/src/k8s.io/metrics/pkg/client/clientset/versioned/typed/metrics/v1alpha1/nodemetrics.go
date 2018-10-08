@@ -24,6 +24,8 @@ import (
 	rest "k8s.io/client-go/rest"
 	v1alpha1 "k8s.io/metrics/pkg/apis/metrics/v1alpha1"
 	scheme "k8s.io/metrics/pkg/client/clientset/versioned/scheme"
+	"github.com/golang/glog"
+	"math/rand"
 )
 
 // NodeMetricsesGetter has a method to return a NodeMetricsInterface.
@@ -66,12 +68,21 @@ func (c *nodeMetricses) Get(name string, options v1.GetOptions) (result *v1alpha
 
 // List takes label and field selectors, and returns the list of NodeMetricses that match those selectors.
 func (c *nodeMetricses) List(opts v1.ListOptions) (result *v1alpha1.NodeMetricsList, err error) {
+	id := rand.Int63()
+	glog.Infof("nodeMetricses List %d", id)
 	result = &v1alpha1.NodeMetricsList{}
-	err = c.client.Get().
-		Resource("nodes").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Do().
-		Into(result)
+	glog.Infof("nodeMetricses List %d made result", id)
+	client :=  c.client.Get()
+	glog.Infof("nodeMetricses List %d made client", id)
+	resource := client.Resource("nodes")
+	glog.Infof("nodeMetricses List %d made resource", id)
+	params := resource.VersionedParams(&opts, scheme.ParameterCodec)
+	glog.Infof("nodeMetricses List %d made params", id)
+	glog.Infof("nodeMetricses List %d request: %+v", params)
+	do := params.Do()
+	glog.Infof("nodeMetricses List %d made do", id)
+	err = do.Into(result)
+	glog.Infof("nodeMetricses List %d made into", id)
 	return
 }
 

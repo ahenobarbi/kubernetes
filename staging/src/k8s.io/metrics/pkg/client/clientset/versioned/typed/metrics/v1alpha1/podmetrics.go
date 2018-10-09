@@ -24,6 +24,8 @@ import (
 	rest "k8s.io/client-go/rest"
 	v1alpha1 "k8s.io/metrics/pkg/apis/metrics/v1alpha1"
 	scheme "k8s.io/metrics/pkg/client/clientset/versioned/scheme"
+	"github.com/golang/glog"
+	"math/rand"
 )
 
 // PodMetricsesGetter has a method to return a PodMetricsInterface.
@@ -69,13 +71,20 @@ func (c *podMetricses) Get(name string, options v1.GetOptions) (result *v1alpha1
 
 // List takes label and field selectors, and returns the list of PodMetricses that match those selectors.
 func (c *podMetricses) List(opts v1.ListOptions) (result *v1alpha1.PodMetricsList, err error) {
+	id := rand.Int63()
+	glog.Infof("podMetricses(a) %d List", id)
 	result = &v1alpha1.PodMetricsList{}
-	err = c.client.Get().
-		Namespace(c.ns).
+	glog.Infof("podMetricses %d List made result", id)
+	client := c.client.Get()
+	glog.Infof("podMetricses %d List got client", id)
+	query := client.Namespace(c.ns).
 		Resource("pods").
-		VersionedParams(&opts, scheme.ParameterCodec).
-		Do().
-		Into(result)
+		VersionedParams(&opts, scheme.ParameterCodec)
+	glog.Infof("podMetricses %d List built query: %+v", id, query)
+	do := query.Do()
+	glog.Infof("podMetricses %d List executed query", id)
+	do.Into(result)
+	glog.Infof("podMetricses %d List saved query result", id)
 	return
 }
 
